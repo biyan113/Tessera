@@ -4,6 +4,7 @@ import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.LauncherActivityInfo
 import android.content.pm.LauncherApps
@@ -79,11 +80,21 @@ object Apps {
         launcher(app).registerCallback(cb, Bg.main)
     }
 
-    fun launch(c: Context, a: AppInfo, src: Rect?, opts: android.os.Bundle?) {
-        try {
-            launcher(c).startMainActivity(a.info.componentName, a.info.user, src, opts)
-        } catch (_: Exception) {
-        }
+    /**
+     * Apps in the owner's profile start straight from here: through LauncherApps the system
+     * service is the caller, and the launcher's custom window animation gets dropped.
+     */
+    fun launch(c: Context, a: AppInfo, src: Rect?, opts: android.os.Bundle?): Boolean = try {
+        if (a.info.user == android.os.Process.myUserHandle()) {
+            val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                .setComponent(a.info.componentName)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+            i.sourceBounds = src
+            c.startActivity(i, opts)
+        } else launcher(c).startMainActivity(a.info.componentName, a.info.user, src, opts)
+        true
+    } catch (_: Exception) {
+        false
     }
 
     fun shortcuts(c: Context, a: AppInfo): List<ShortcutInfo> = try {
@@ -171,6 +182,7 @@ object Frequent {
             return
         }
         scoredAt = now
+        Icons.release()
         Bg.ui {
             val byPkg = HashMap<String, AppInfo>()
             for (a in Apps.map.values) byPkg.putIfAbsent(a.pkg, a)

@@ -1,5 +1,6 @@
 package app.homepad
 
+import android.app.Notification
 import android.app.WallpaperManager
 import android.content.Context
 import android.graphics.Bitmap
@@ -15,6 +16,7 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.Drawable
+import android.os.UserHandle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.LruCache
@@ -276,19 +278,30 @@ class BadgeService : NotificationListenerService() {
     override fun onListenerConnected() = refresh()
     override fun onNotificationPosted(n: StatusBarNotification?) = refresh()
     override fun onNotificationRemoved(n: StatusBarNotification?) = refresh()
+    override fun onNotificationRankingUpdate(map: RankingMap?) = refresh()
 
     private fun refresh() {
-        val list = try { activeNotifications } catch (_: Exception) { null } ?: return
-        val out = HashMap<String, Int>()
-        for (n in list) {
-            if (n.isOngoing || n.notification.flags and android.app.Notification.FLAG_GROUP_SUMMARY != 0) continue
-            out[n.packageName] = (out[n.packageName] ?: 0) + 1
-        }
+        val out = HashMap<UserHandle, HashMap<String, Int>>()
+        try {
+            val ranks = currentRanking
+            val rank = Ranking()
+            val skip = Notification.FLAG_GROUP_SUMMARY or Notification.FLAG_FOREGROUND_SERVICE
+            for (n in activeNotifications) {
+                if (n.isOngoing || n.notification.flags and skip != 0) continue
+                // Players and other silent channels opt out of badges; honour that like the system does.
+                if (ranks.getRanking(n.key, rank) && !rank.canShowBadge()) continue
+                val apps = out.getOrPut(n.user) { HashMap() }
+                apps[n.packageName] = (apps[n.packageName] ?: 0) + 1
+            }
+        } catch (_: Exception) { return }
         Bg.ui { counts = out; onChanged?.invoke() }
     }
 
     companion object {
-        @Volatile var counts: Map<String, Int> = emptyMap()
+        @Volatile private var counts: Map<UserHandle, Map<String, Int>> = emptyMap()
         var onChanged: (() -> Unit)? = null
+
+        /** Per profile, so a clone never shows the owner's count. */
+        fun of(a: AppInfo) = counts[a.info.user]?.get(a.pkg) ?: 0
     }
 }

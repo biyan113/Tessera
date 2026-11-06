@@ -59,7 +59,7 @@ open class Backdrop(protected val act: HomeActivity) : FrameLayout(act) {
 class IconGrid(
     private val home: HomeView,
     private val colsWanted: Int,
-    private val onTap: (AppInfo) -> Unit,
+    private val onTap: (AppInfo, RectF) -> Unit,
     private val onLong: ((AppInfo) -> Unit)? = null,
 ) : View(home.context) {
     var apps: List<AppInfo> = emptyList()
@@ -70,20 +70,31 @@ class IconGrid(
         color = Color.WHITE; textSize = context.px(12f); textAlign = Paint.Align.CENTER
     }
 
-    private fun at(e: MotionEvent): AppInfo? {
+    private fun index(e: MotionEvent) = (e.y / cellH).toInt() * colsWanted + (e.x / (width / colsWanted.toFloat())).toInt()
+
+    private fun at(e: MotionEvent): AppInfo? = apps.getOrNull(index(e))
+
+    /** Where icon [i] sits on screen, so a launch can grow out of it. */
+    private fun rectOf(i: Int): RectF {
         val cw = width / colsWanted.toFloat()
-        val i = (e.y / cellH).toInt() * colsWanted + (e.x / cw).toInt()
-        return apps.getOrNull(i)
+        val loc = IntArray(2)
+        getLocationOnScreen(loc)
+        val x = loc[0] + (i % colsWanted) * cw + (cw - icon) / 2
+        val y = loc[1] + (i / colsWanted) * cellH + context.px(8f)
+        return RectF(x, y, x + icon, y + icon)
     }
 
     private val gd = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent) = true
-        override fun onSingleTapUp(e: MotionEvent): Boolean { at(e)?.let(onTap); return true }
+        override fun onSingleTapUp(e: MotionEvent): Boolean { at(e)?.let { onTap(it, rectOf(index(e))) }; return true }
         override fun onLongPress(e: MotionEvent) { at(e)?.let { onLong?.invoke(it) } }
     })
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent) = gd.onTouchEvent(e)
+
+    override fun onAttachedToWindow() { super.onAttachedToWindow(); home.grids += this }
+    override fun onDetachedFromWindow() { home.grids -= this; super.onDetachedFromWindow() }
 
     override fun onMeasure(w: Int, h: Int) {
         val rows = ceil(apps.size / colsWanted.toFloat()).toInt()
@@ -98,6 +109,7 @@ class IconGrid(
             home.drawIcon(c, a, x, y, icon)
             val s = TextUtils.ellipsize(a.label, paint, cw - context.px(8f), TextUtils.TruncateAt.END).toString()
             c.drawText(s, x + icon / 2, y + icon + context.px(18f), paint)
+            home.badge(c, BadgeService.of(a), x + icon, y)
         }
     }
 }
@@ -125,9 +137,9 @@ class FolderView(act: HomeActivity, folder: Item.Folder?, fixed: Pair<String, Li
         title.typeface = android.graphics.Typeface.DEFAULT_BOLD
         title.gravity = Gravity.CENTER
         val w = (c.px(116f) * cols + c.px(36f)).toInt()
-        val grid = IconGrid(act.home, cols, { a ->
+        val grid = IconGrid(act.home, cols, { a, r ->
             act.closeOverlay()
-            act.launch(a, RectF(width / 2f, height / 2f, width / 2f + 1, height / 2f + 1))
+            act.launch(a, r)
         }, { a ->
             if (folder != null) { act.takeOutOfFolder(folder, a.key); act.closeOverlay() }
         })
@@ -241,9 +253,9 @@ class SpotlightView(act: HomeActivity) : Backdrop(act) {
         val field = searchField(c, "搜索")
         val top = act.home.insetTop + c.px(70f).toInt()
         val w = min(c.px(640f).toInt(), resources.displayMetrics.widthPixels - c.px(32f).toInt())
-        val grid = IconGrid(act.home, 6, { a ->
+        val grid = IconGrid(act.home, 6, { a, r ->
             act.closeOverlay()
-            act.launch(a, RectF(0f, 0f, 1f, 1f))
+            act.launch(a, r)
         })
         grid.apps = suggestions(act)
         val col = GlassPanel(c, c.px(24f), 0x40FFFFFF).apply {
@@ -264,7 +276,7 @@ class SpotlightView(act: HomeActivity) : Backdrop(act) {
             val q = v.text.toString()
             val hit = Apps.find(q).firstOrNull()
             act.closeOverlay()
-            if (hit != null) act.launch(hit, RectF(0f, 0f, 1f, 1f)) else if (q.isNotBlank()) act.webSearch(q)
+            if (hit != null) act.launch(hit, act.centerRect()) else if (q.isNotBlank()) act.webSearch(q)
             true
         }
         field.requestFocus()
@@ -283,7 +295,7 @@ class LibraryView(private val act: HomeActivity) : FrameLayout(act) {
         if (top.isEmpty()) Apps.categories() else listOf("高频" to top) + Apps.categories()
     }
     private val tiles = Tiles()
-    private val results = IconGrid(act.home, 6, { a -> act.launch(a, RectF(0f, 0f, 1f, 1f)) })
+    private val results = IconGrid(act.home, 6, { a, r -> act.launch(a, r) })
     private val pane = ScrollView(act).apply { isVerticalScrollBarEnabled = false; addView(tiles) }
     private val found = ScrollView(act).apply { isVerticalScrollBarEnabled = false; addView(results); visibility = GONE }
 
@@ -313,7 +325,7 @@ class LibraryView(private val act: HomeActivity) : FrameLayout(act) {
     fun refresh() { tiles.invalidate(); results.invalidate() }
 
     private inner class Tiles : View(act) {
-        private val perRow get() = if (width > height * 0 && resources.configuration.orientation == 2) 5 else 3
+        private val perRow get() = (measuredWidth / context.px(190f)).toInt().coerceIn(3, 6)
         private val pad = context.px(14f)
         private val labelH = context.px(32f)
         private val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -333,7 +345,14 @@ class LibraryView(private val act: HomeActivity) : FrameLayout(act) {
                 val inY = e.y % (s + labelH + pad) > s / 2
                 val slot = (if (inY) 2 else 0) + if (inX) 1 else 0
                 if (slot == 3 && cat.second.size > 4) act.openCategory(cat.first, cat.second)
-                else cat.second.getOrNull(slot)?.let { act.launch(it, RectF(e.rawX, e.rawY, e.rawX + 1, e.rawY + 1)) }
+                else cat.second.getOrNull(slot)?.let {
+                    val g = context.px(12f)
+                    val big = (s - g * 3) / 2
+                    getLocationOnScreen(at)
+                    val x = at[0] + (i % perRow) * (s + pad) + g + (slot % 2) * (big + g)
+                    val y = at[1] + (i / perRow) * (s + labelH + pad) + g + (slot / 2) * (big + g)
+                    act.launch(it, RectF(x, y, x + big, y + big))
+                }
                 return true
             }
         })
@@ -343,8 +362,9 @@ class LibraryView(private val act: HomeActivity) : FrameLayout(act) {
 
         override fun onMeasure(w: Int, h: Int) {
             val width = MeasureSpec.getSize(w)
-            val s = (width - pad * (perRow - 1)) / perRow
-            val rows = ceil(cats.size / perRow.toFloat()).toInt()
+            val cols = (width / context.px(190f)).toInt().coerceIn(3, 6)
+            val s = (width - pad * (cols - 1)) / cols
+            val rows = ceil(cats.size / cols.toFloat()).toInt()
             setMeasuredDimension(width, (rows * (s + labelH + pad)).toInt())
         }
 
@@ -367,7 +387,11 @@ class LibraryView(private val act: HomeActivity) : FrameLayout(act) {
                         for (k in 0 until min(4, list.size - 3)) {
                             act.home.drawIcon(c, list[3 + k], ix + (k % 2) * (m + context.px(6f)), iy + (k / 2) * (m + context.px(6f)), m)
                         }
-                    } else act.home.drawIcon(c, list[n], ix, iy, big)
+                        act.home.badge(c, list.drop(3).sumOf(BadgeService::of), ix + big, iy)
+                    } else {
+                        act.home.drawIcon(c, list[n], ix, iy, big)
+                        act.home.badge(c, BadgeService.of(list[n]), ix + big, iy)
+                    }
                 }
                 c.drawText(cat.first, x + s / 2, y + s + context.px(21f), paint)
             }

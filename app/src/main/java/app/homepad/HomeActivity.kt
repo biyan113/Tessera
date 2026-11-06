@@ -33,6 +33,7 @@ class HomeActivity : Activity() {
     var overlay: View? = null
         private set
     private var pendingWidget: Triple<Int, Int, Int>? = null
+    private var stopped = false
 
     private val ticker = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -71,8 +72,9 @@ class HomeActivity : Activity() {
 
         Apps.onChanged = { home.refreshAll(); persist() }
         Apps.watch(this)
-        Icons.onLoaded = { home.invalidate(); overlay?.invalidate(); home.library?.refresh() }
-        BadgeService.onChanged = { home.invalidate() }
+        val repaint = { home.invalidate(); home.grids.forEach { it.invalidate() }; home.library?.refresh(); Unit }
+        Icons.onLoaded = repaint
+        BadgeService.onChanged = repaint
         Glass.load(this) { wallpaperReady() }
         onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
             if (overlay != null) closeOverlay() else home.goHome()
@@ -96,6 +98,8 @@ class HomeActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (stopped) settleIn()
+        stopped = false
         val f = IntentFilter(Intent.ACTION_TIME_TICK).apply {
             addAction(Intent.ACTION_TIME_CHANGED)
             addAction(Intent.ACTION_WALLPAPER_CHANGED)
@@ -113,6 +117,7 @@ class HomeActivity : Activity() {
     override fun onStop() {
         super.onStop()
         host.stopListening()
+        stopped = true
         Icons.shrink()
         Icons.release()
     }
@@ -124,7 +129,8 @@ class HomeActivity : Activity() {
 
     override fun onNewIntent(i: Intent) {
         super.onNewIntent(i)
-        if (i.hasCategory(Intent.CATEGORY_HOME)) {
+        // Coming back from an app keeps the page it was opened from; a press on home itself goes home.
+        if (i.hasCategory(Intent.CATEGORY_HOME) && !stopped) {
             if (overlay != null) closeOverlay() else home.goHome()
         }
     }
@@ -158,6 +164,25 @@ class HomeActivity : Activity() {
         val b = Rect(r.left.toInt(), r.top.toInt(), r.right.toInt(), r.bottom.toInt())
         val o = ActivityOptions.makeScaleUpAnimation(home, b.left, b.top, b.width(), b.height()).toBundle()
         Apps.launch(this, a, b, o)
+    }
+
+    /** One quiet ease back into place when returning from an app. */
+    private fun settleIn() {
+        home.alpha = 0.4f
+        home.scaleX = 1.04f
+        home.scaleY = 1.04f
+        home.pivotX = home.width / 2f
+        home.pivotY = home.height / 2f
+        home.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(240)
+            .setInterpolator(android.view.animation.DecelerateInterpolator(2f)).start()
+    }
+
+    /** Where a launch with no icon on screen, such as search's enter key, grows from. */
+    fun centerRect(): RectF {
+        val s = 64 * resources.displayMetrics.density
+        val x = (home.width - s) / 2
+        val y = (home.height - s) / 2
+        return RectF(x, y, x + s, y + s)
     }
 
     // ---- overlays: built on open, dropped on close, so they cost nothing while idle ----

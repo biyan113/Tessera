@@ -65,6 +65,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
     val libIndex get() = layoutModel.pages.size
     val page get() = if (width == 0) 1 else (scroll / width).roundToInt()
     private var settle: ValueAnimator? = null
+    private var settleTarget = 1
 
     var jiggle = false
         private set
@@ -119,6 +120,9 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         clipChildren = false
     }
 
+    /** Fading the home screen must not allocate a screen-sized layer; icons barely overlap anyway. */
+    override fun hasOverlappingRendering() = false
+
     // ---- layout ----
 
     override fun onMeasure(w: Int, h: Int) {
@@ -141,10 +145,15 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
     }
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        val p = if (ow > 0) (scroll / ow).roundToInt() else 1
+        // A page turn in flight still aims at the old width, so land on its target instead.
+        val p = if (settle?.isRunning == true) settleTarget else if (ow > 0) (scroll / ow).roundToInt() else 1
+        settle?.cancel()
+        // The library is sized at creation, so a rotation has to rebuild it.
+        library?.let { removeView(it); library = null }
         metrics()
         scroll = (p * w).toFloat()
-        syncWidgets()
+        // Views added during this layout pass would stay unmeasured, so wait for it to finish.
+        post { syncWidgets() }
     }
 
     fun metrics() {
@@ -331,12 +340,12 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
             is Item.App -> Apps.map[it.key]?.let { a ->
                 drawIcon(c, a, x, y, icon)
                 if (withLabel) drawLabel(c, a.let { ai -> shortOf(ai) }, x + icon / 2, y + icon + dp(17f))
-                badge(c, BadgeService.counts[a.pkg] ?: 0, x + icon, y)
+                badge(c, BadgeService.of(a), x + icon, y)
             }
             is Item.Folder -> {
                 drawFolder(c, it, x, y)
                 if (withLabel) drawLabel(c, it.name, x + icon / 2, y + icon + dp(17f))
-                badge(c, it.apps.sumOf { k -> Apps.map[k]?.let { a -> BadgeService.counts[a.pkg] } ?: 0 }, x + icon, y)
+                badge(c, it.apps.sumOf { k -> Apps.map[k]?.let(BadgeService::of) ?: 0 }, x + icon, y)
             }
             else -> {}
         }
@@ -354,6 +363,9 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
     }
 
     private fun drawLabel(c: Canvas, s: String, x: Float, y: Float) = c.drawText(s, x, y, label)
+
+    /** Grids on screen; a parent invalidate does not repaint them. */
+    val grids = HashSet<IconGrid>()
 
     fun drawIcon(c: Canvas, a: AppInfo, x: Float, y: Float, size: Float) {
         val b = Icons.get(a)
@@ -385,7 +397,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         }
     }
 
-    private fun badge(c: Canvas, n: Int, rx: Float, ty: Float) {
+    fun badge(c: Canvas, n: Int, rx: Float, ty: Float) {
         if (n <= 0) return
         val r = dp(11f)
         val s = if (n > 99) "99+" else n.toString()
@@ -491,11 +503,16 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         val w = width.toFloat()
         val libFrac = ((scroll - (libIndex - 1) * w) / w).coerceIn(0f, 1f)
         val a = ((1 - libFrac) * 255).toInt()
-        if (a > 0) {
-            c.saveLayerAlpha(0f, 0f, w, height.toFloat(), a)
-            drawDock(c)
-            drawDots(c)
-            c.restore()
+        when {
+            a >= 255 -> { drawDock(c); drawDots(c) }
+            a > 0 -> {
+                // Only while sliding to the library, and only as tall as the dock: a full-screen
+                // layer here costs a screen-sized GPU buffer.
+                c.saveLayerAlpha(0f, dockRect.top - dp(24f), w, height.toFloat(), a)
+                drawDock(c)
+                drawDots(c)
+                c.restore()
+            }
         }
         if (jiggle) {
             for ((p, list) in layoutModel.pages.withIndex()) {
@@ -522,7 +539,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         x += dp(21f) - dp(8f) + dp(8f)
         for (a in recents) {
             drawIcon(c, a, x - dp(8f) + dp(8f), dockIconY, icon)
-            badge(c, BadgeService.counts[a.pkg] ?: 0, x + icon, dockIconY)
+            badge(c, BadgeService.of(a), x + icon, dockIconY)
             x += dockSlot
         }
         drawLibraryGlyph(c, x, dockIconY)
@@ -739,6 +756,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
 
     fun snapTo(p: Int, fast: Boolean = false) {
         settle?.cancel()
+        settleTarget = p
         val from = scroll
         val to = (p * width).toFloat()
         settle = ValueAnimator.ofFloat(0f, 1f).apply {
