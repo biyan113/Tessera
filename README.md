@@ -76,6 +76,18 @@ adb shell am force-stop com.zui.launcher
 
 首次运行的布局写在 `Model.kt` 的 `seed` 里，是作者自己的应用排布，换设备时改这里。
 
+## 下拉面板
+
+`shade/` 用 fabricated overlay 把 ZUI 的控制中心和通知改成 iOS 风格：面板从约 382dp 加宽到 640dp，通知卡片换成大圆角和半透明磨砂，并改成左侧 40dp 大图标、右侧文字的排版。不改系统文件，需要 root。
+
+```bash
+shade/build.sh
+adb push shade/build/shade.dex /data/local/tmp/shade.dex
+adb shell "su -c 'CLASSPATH=/data/local/tmp/shade.dex app_process / Shade'"
+```
+
+首次应用后要重启一次 SystemUI，媒体卡片才会按新宽度排版。还原时把最后一条命令的 `Shade` 换成 `Shade off`。
+
 ## ZUI 上的注意事项
 
 - 系统的手势上滑和多任务由 `com.zui.launcher` 提供，不能卸载它。只禁用桌面入口：
