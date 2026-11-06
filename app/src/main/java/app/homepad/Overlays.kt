@@ -279,7 +279,9 @@ class SpotlightView(act: HomeActivity) : Backdrop(act) {
 /** App library page: every app, grouped automatically, one canvas view for all tiles. */
 @SuppressLint("ViewConstructor")
 class LibraryView(private val act: HomeActivity) : FrameLayout(act) {
-    private val cats = Apps.categories()
+    private val cats = Frequent.top.let { top ->
+        if (top.isEmpty()) Apps.categories() else listOf("高频" to top) + Apps.categories()
+    }
     private val tiles = Tiles()
     private val results = IconGrid(act.home, 6, { a -> act.launch(a, RectF(0f, 0f, 1f, 1f)) })
     private val pane = ScrollView(act).apply { isVerticalScrollBarEnabled = false; addView(tiles) }

@@ -1,5 +1,7 @@
 package app.homepad
 
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.pm.ApplicationInfo
@@ -15,6 +17,7 @@ import android.os.UserManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import kotlin.math.pow
 
 /** One background thread for all off-UI work: a pool would only cost more stacks. */
 object Bg {
@@ -129,6 +132,50 @@ object Apps {
             out.getValue(name).add(a)
         }
         return out.filter { it.value.isNotEmpty() }.map { it.key to it.value }
+    }
+}
+
+/**
+ * Apps the owner keeps coming back to. Each switch into an app scores one point that halves every
+ * three days, so a burst of recent use beats heavy use last month. Switches are counted rather
+ * than foreground time, because one long video should not outrank an app opened twenty times.
+ */
+object Frequent {
+    private const val WINDOW = 14 * 86_400_000L
+    private const val HALF_LIFE = 3 * 86_400_000.0
+    private const val REFRESH = 10 * 60_000L
+    private const val LIMIT = 12
+
+    var top: List<AppInfo> = emptyList()
+        private set
+    private var scoredAt = 0L
+
+    /** Call on the background thread; it reads the usage log, which can hold many thousands of events. */
+    fun refresh(c: Context) {
+        val now = System.currentTimeMillis()
+        if (now - scoredAt < REFRESH) return
+        val score = HashMap<String, Double>()
+        try {
+            val log = c.getSystemService(UsageStatsManager::class.java)!!.queryEvents(now - WINDOW, now)
+            val e = UsageEvents.Event()
+            var last: String? = null
+            while (log.hasNextEvent()) {
+                log.getNextEvent(e)
+                if (e.eventType != UsageEvents.Event.ACTIVITY_RESUMED) continue
+                val p = e.packageName
+                if (p == last) continue
+                last = p
+                score[p] = (score[p] ?: 0.0) + 0.5.pow((now - e.timeStamp) / HALF_LIFE)
+            }
+        } catch (_: Exception) {
+            return
+        }
+        scoredAt = now
+        Bg.ui {
+            val byPkg = HashMap<String, AppInfo>()
+            for (a in Apps.map.values) byPkg.putIfAbsent(a.pkg, a)
+            top = score.entries.sortedByDescending { it.value }.mapNotNull { byPkg[it.key] }.take(LIMIT)
+        }
     }
 }
 

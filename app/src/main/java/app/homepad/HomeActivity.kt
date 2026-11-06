@@ -131,6 +131,7 @@ class HomeActivity : Activity() {
 
     private fun loadRecents() {
         Bg.run {
+            Frequent.refresh(this)
             val out = try {
                 val us = getSystemService(UsageStatsManager::class.java)!!
                 val now = System.currentTimeMillis()
