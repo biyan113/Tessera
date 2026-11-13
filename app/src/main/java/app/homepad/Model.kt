@@ -126,9 +126,9 @@ object Apps {
     private val hand = mapOf(
         "社交" to listOf("com.tencent.mm", "com.tencent.mobileqq", "com.twitter.android", "com.instagram", "org.telegram", "com.xingin.xhs", "com.tencent.weread"),
         "影音娱乐" to listOf("tv.danmaku.bili", "com.google.android.youtube", "com.facebook.aura", "com.netease.party", "com.zui.gallery", "com.zui.camera", "com.zui.recorder"),
-        "效率" to listOf("ai.x.grok", "com.google.android.apps.bard", "com.openai.chatgpt", "com.larksuite", "ai.usemagpie", "cn.wps", "com.google.android.gm", "com.zui.calendar", "com.zui.notes"),
-        "开发与远程" to listOf("com.server.auditor", "dev.tty7", "com.netease.uuremote", "com.orbitlink", "top.songya", "com.android.virtualization", "app.radif"),
-        "实用工具" to listOf("com.zui.", "com.xiaomi.smarthome", "com.eg.android", "app.weatherpad", "com.google.android.apps.authenticator2", "com.tencent.wetype", "app.msime", "com.android.settings", "com.android.vending", "com.google.android.googlequicksearchbox", "com.android.chrome"),
+        "效率" to listOf("ai.x.grok", "com.google.android.apps.bard", "com.openai.chatgpt", "com.larksuite", "cn.wps", "com.google.android.gm", "com.zui.calendar", "com.zui.notes"),
+        "开发与远程" to listOf("com.server.auditor", "com.netease.uuremote", "com.orbitlink", "com.android.virtualization"),
+        "实用工具" to listOf("com.zui.", "com.xiaomi.smarthome", "com.eg.android", "app.weatherpad", "com.google.android.apps.authenticator2", "com.tencent.wetype", "com.android.settings", "com.android.vending", "com.google.android.googlequicksearchbox", "com.android.chrome"),
     )
 
     /** Ordered category name to apps, in the fixed order the library shows them. */
@@ -300,15 +300,15 @@ class Layout(val pages: MutableList<MutableList<Item>>, val dock: MutableList<It
         private val seedFolders = linkedMapOf(
             "社交" to listOf("com.tencent.weread", "tv.danmaku.bili", "com.twitter.android", "com.instagram.android", "com.instagram.barcelona", "org.telegram.messenger"),
             "影音" to listOf("com.google.android.youtube", "com.netease.party", "com.facebook.aura"),
-            "远程" to listOf("com.netease.uuremote", "com.orbitlink.android", "dev.tty7.pad", "com.android.virtualization.terminal", "top.songya.y700ubuntu", "top.songya.y700proc", "app.radif.pad"),
-            "工作" to listOf("ai.x.grok", "com.google.android.apps.bard", "com.openai.chatgpt", "com.larksuite.suite", "ai.usemagpie.pad", "cn.wps.moffice_eng"),
-            "工具" to listOf("com.zui.calculator", "com.zui.contacts", "com.zui.notes", "com.zui.safecenter", "com.zui.filemanager", "com.zui.recorder", "com.zui.deskclock", "com.tencent.wetype", "app.msime.android", "com.google.android.apps.authenticator2", "com.xiaomi.smarthome"),
+            "远程" to listOf("com.netease.uuremote", "com.orbitlink.android", "com.android.virtualization.terminal"),
+            "工作" to listOf("ai.x.grok", "com.google.android.apps.bard", "com.openai.chatgpt", "com.larksuite.suite", "cn.wps.moffice_eng"),
+            "工具" to listOf("com.zui.calculator", "com.zui.contacts", "com.zui.notes", "com.zui.safecenter", "com.zui.filemanager", "com.zui.recorder", "com.zui.deskclock", "com.tencent.wetype", "com.google.android.apps.authenticator2", "com.xiaomi.smarthome"),
             "联想" to listOf("com.lenovo.legionzone", "com.lenovo.xbb", "com.lenovo.hybridworkspace", "com.motorola.mobiledesktop"),
             "Google" to listOf("com.google.android.gm", "com.google.android.googlequicksearchbox", "com.android.vending"),
             "Root" to listOf("com.reveny.nativecheck", "io.github.vvb2060.keyattestation", "com.byxiaorun.detector"),
         )
 
-        /** First run: keeps the arrangement the owner already had in their previous launcher. */
+        /** First-run layout of common apps; unused packages are skipped. */
         fun seed(apps: Map<String, AppInfo>): Layout {
             val byPkg = apps.values.groupBy { it.pkg }
             val used = HashSet<String>()

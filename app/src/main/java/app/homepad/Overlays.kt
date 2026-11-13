@@ -40,6 +40,9 @@ open class GlassPanel(c: Context, private val radius: Float, private val tint: I
     }
 }
 
+/** An overlay that grew out of something on the home screen and can shrink back into it. */
+interface Morph { fun leave() }
+
 /** Full-screen frosted backdrop; tapping it dismisses the overlay. */
 open class Backdrop(protected val act: HomeActivity) : FrameLayout(act) {
     private val r = RectF()
@@ -50,7 +53,7 @@ open class Backdrop(protected val act: HomeActivity) : FrameLayout(act) {
     }
     override fun onDraw(c: Canvas) {
         r.set(0f, 0f, width.toFloat(), height.toFloat())
-        Glass.draw(c, r, 0f, 0x38000000, 245, border = false)
+        Glass.draw(c, r, 0f, 0x38000000, Glass.veil, border = false)
     }
 }
 
@@ -115,7 +118,66 @@ class IconGrid(
 }
 
 @SuppressLint("ViewConstructor")
-class FolderView(act: HomeActivity, folder: Item.Folder?, fixed: Pair<String, List<AppInfo>>?) : Backdrop(act) {
+class FolderView(act: HomeActivity, folder: Item.Folder?, fixed: Pair<String, List<AppInfo>>?, private val source: RectF?) : Backdrop(act), Morph {
+    private lateinit var panelView: View
+    private lateinit var titleView: View
+    private lateinit var gridView: View
+    private val at = IntArray(2)
+
+    /** Places the panel exactly over the icon it belongs to, so it can grow from there and return to it. */
+    private fun toSource() {
+        val src = source
+        val p = panelView
+        p.pivotX = 0f
+        p.pivotY = 0f
+        if (src == null || p.width == 0) {
+            p.pivotX = p.width / 2f
+            p.pivotY = p.height / 2f
+            p.scaleX = 0.82f
+            p.scaleY = 0.82f
+            return
+        }
+        p.translationX = 0f
+        p.translationY = 0f
+        p.scaleX = 1f
+        p.scaleY = 1f
+        p.getLocationOnScreen(at)
+        p.scaleX = src.width() / p.width
+        p.scaleY = src.height() / p.height
+        p.translationX = src.left - at[0]
+        p.translationY = src.top - at[1]
+    }
+
+    override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+        super.onLayout(changed, l, t, r, b)
+        if (!entered && panelView.width > 0) {
+            entered = true
+            toSource()
+            val s = Spring(0.84f, 0.40f)
+            panelView.animate().scaleX(1f).scaleY(1f).translationX(0f).translationY(0f).setDuration(s.millis).setInterpolator(s).start()
+            gridView.alpha = 0f
+            gridView.animate().alpha(1f).setStartDelay(40).setDuration(180).start()
+            titleView.alpha = 0f
+            titleView.translationY = context.px(10f)
+            titleView.animate().alpha(1f).translationY(0f).setStartDelay(110).setDuration(220).start()
+        }
+    }
+
+    private var entered = false
+
+    override fun leave() {
+        val p = panelView
+        val sx = p.scaleX; val sy = p.scaleY; val tx = p.translationX; val ty = p.translationY
+        p.animate().cancel()
+        toSource()
+        val ex = p.scaleX; val ey = p.scaleY; val etx = p.translationX; val ety = p.translationY
+        p.scaleX = sx; p.scaleY = sy; p.translationX = tx; p.translationY = ty
+        p.animate().scaleX(ex).scaleY(ey).translationX(etx).translationY(ety).setDuration(250)
+            .setInterpolator(android.view.animation.DecelerateInterpolator(1.8f)).start()
+        gridView.animate().alpha(0f).setStartDelay(0).setDuration(120).start()
+        titleView.animate().alpha(0f).setStartDelay(0).setDuration(90).start()
+    }
+
     init {
         val c = act
         val name = folder?.name ?: fixed!!.first
@@ -155,45 +217,208 @@ class FolderView(act: HomeActivity, folder: Item.Folder?, fixed: Pair<String, Li
             addView(title, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = c.px(14f).toInt() })
             addView(panel, LinearLayout.LayoutParams(w, -2))
         }
+        panelView = panel
+        titleView = title
+        gridView = scroll
         addView(col, LayoutParams(w, -2, Gravity.CENTER))
     }
 }
 
+const val G_SEARCH = 0
+const val G_EDIT = 1
+const val G_INFO = 2
+const val G_REMOVE = 3
+
+/** The few line symbols the launcher needs, drawn as strokes so no icon font or bitmap ships. */
+class Glyph(private val kind: Int, color: Int, private val size: Float) : android.graphics.drawable.Drawable() {
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = color; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+    }
+    override fun getIntrinsicWidth() = size.toInt()
+    override fun getIntrinsicHeight() = size.toInt()
+    override fun setAlpha(a: Int) { p.alpha = a }
+    override fun setColorFilter(f: android.graphics.ColorFilter?) { p.colorFilter = f }
+    @Deprecated("Deprecated in Java") override fun getOpacity() = android.graphics.PixelFormat.TRANSLUCENT
+    override fun draw(c: Canvas) {
+        val b = bounds
+        val u = minOf(b.width(), b.height()) / 22f
+        val cx = b.exactCenterX()
+        val cy = b.exactCenterY()
+        p.strokeWidth = 1.7f * u
+        p.style = Paint.Style.STROKE
+        when (kind) {
+            G_SEARCH -> {
+                c.drawCircle(cx - 1.5f * u, cy - 1.5f * u, 6.2f * u, p)
+                c.drawLine(cx + 3.2f * u, cy + 3.2f * u, cx + 8f * u, cy + 8f * u, p)
+            }
+            G_EDIT -> {
+                c.drawRoundRect(cx - 6.5f * u, cy - 9f * u, cx + 6.5f * u, cy + 9f * u, 3.2f * u, 3.2f * u, p)
+                p.style = Paint.Style.FILL
+                for (i in 0 until 4) {
+                    val x = cx + (if (i % 2 == 0) -3.6f else 0.8f) * u
+                    val y = cy + (if (i < 2) -5.6f else -1.2f) * u
+                    c.drawRoundRect(x, y, x + 2.8f * u, y + 2.8f * u, 0.8f * u, 0.8f * u, p)
+                }
+            }
+            G_INFO -> {
+                c.drawCircle(cx, cy, 8.6f * u, p)
+                c.drawLine(cx, cy - 0.6f * u, cx, cy + 4.2f * u, p)
+                p.style = Paint.Style.FILL
+                c.drawCircle(cx, cy - 4.2f * u, 1.15f * u, p)
+            }
+            G_REMOVE -> {
+                c.drawCircle(cx, cy, 8.6f * u, p)
+                c.drawLine(cx - 4f * u, cy, cx + 4f * u, cy, p)
+            }
+        }
+    }
+}
+
+class MenuRow(val text: String, val icon: android.graphics.drawable.Drawable?, val red: Boolean, val group: Boolean, val go: () -> Unit)
+
+/** Context menu body: every row on one canvas, clipped to a rounded outline that also casts the shadow. */
 @SuppressLint("ViewConstructor")
-class MenuView(act: HomeActivity, item: Item, r: RectF) : FrameLayout(act) {
+class MenuList(private val act: HomeActivity, private val rows: List<MenuRow>, private val dark: Boolean) : View(act) {
+    private val rowH = context.px(46f)
+    private val gapH = context.px(8f)
+    private val r = RectF()
+    private val at = IntArray(2)
+    private var down = -1
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val ink = if (dark) Color.WHITE else 0xFF111114.toInt()
+    private val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textSize = context.px(17f) }
+
+    val total get() = (rows.size * rowH + rows.count { it.group } * gapH).toInt()
+
     init {
+        outlineProvider = object : android.view.ViewOutlineProvider() {
+            override fun getOutline(v: View, o: android.graphics.Outline) = o.setPath(Smooth.path(android.graphics.Path(), 0f, 0f, v.width.toFloat(), v.height.toFloat(), context.px(16f)))
+        }
+        clipToOutline = true
+        elevation = context.px(18f)
+    }
+
+    override fun onMeasure(w: Int, h: Int) = setMeasuredDimension(MeasureSpec.getSize(w), total)
+
+    private fun top(i: Int): Float {
+        var y = 0f
+        for (n in 0 until i) y += rowH
+        for (n in 0..i) if (rows[n].group) y += gapH
+        return y
+    }
+
+    private fun rowAt(y: Float): Int {
+        for (i in rows.indices) { val t = top(i); if (y >= t && y < t + rowH) return i }
+        return -1
+    }
+
+    override fun onDraw(c: Canvas) {
+        getLocationOnScreen(at)
+        r.set(0f, 0f, width.toFloat(), height.toFloat())
+        Glass.draw(c, r, 0f, if (dark) 0xD01E1E21.toInt() else 0xDCF6F6F8.toInt(), 255, at[0].toFloat(), at[1].toFloat(), border = false)
+        val pad = context.px(16f)
+        val g = context.px(22f).toInt()
+        for ((i, row) in rows.withIndex()) {
+            val t = top(i)
+            if (row.group) {
+                fill.color = if (dark) 0x40000000 else 0x14000000
+                c.drawRect(0f, t - gapH, width.toFloat(), t, fill)
+            } else if (i > 0) {
+                fill.color = if (dark) 0x30FFFFFF else 0x243C3C43
+                c.drawRect(0f, t, width.toFloat(), t + 1f, fill)
+            }
+            if (i == down) {
+                fill.color = if (dark) 0x26FFFFFF else 0x1A000000
+                c.drawRect(0f, t, width.toFloat(), t + rowH, fill)
+            }
+            paint.color = if (row.red) (if (dark) 0xFFFF453A.toInt() else 0xFFFF3B30.toInt()) else ink
+            val room = width - pad * 2 - (if (row.icon != null) g + pad / 2 else 0f)
+            val s = TextUtils.ellipsize(row.text, paint, room, TextUtils.TruncateAt.END).toString()
+            c.drawText(s, pad, t + rowH / 2 - (paint.ascent() + paint.descent()) / 2, paint)
+            row.icon?.let {
+                val x = (width - pad - g).toInt()
+                val y = (t + (rowH - g) / 2).toInt()
+                it.setBounds(x, y, x + g, y + g)
+                it.draw(c)
+            }
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                val i = if (e.x < 0 || e.x > width) -1 else rowAt(e.y)
+                if (i != down) { down = i; invalidate() }
+            }
+            MotionEvent.ACTION_UP -> {
+                val i = down
+                down = -1
+                invalidate()
+                if (i >= 0) { act.closeOverlay(); rows[i].go() }
+            }
+            MotionEvent.ACTION_CANCEL -> { down = -1; invalidate() }
+        }
+        return true
+    }
+}
+
+@SuppressLint("ViewConstructor")
+class MenuView(act: HomeActivity, private val item: Item, private val r: RectF) : FrameLayout(act) {
+    private val home = act.home
+    private val full = RectF()
+
+    init {
+        setWillNotDraw(false)
         isClickable = true
         setOnClickListener { act.closeOverlay() }
-        setBackgroundColor(0x55000000)
         val c = act
-        val panel = GlassPanel(c, c.px(16f), 0x70FFFFFF)
+        val dark = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+        val ink = if (dark) Color.WHITE else 0xFF111114.toInt()
+        val red = if (dark) 0xFFFF453A.toInt() else 0xFFFF3B30.toInt()
+        val g = c.px(22f)
+        val rows = ArrayList<MenuRow>()
         val app = (item as? Item.App)?.let { Apps.map[it.key] }
-        fun row(t: String, red: Boolean = false, go: () -> Unit) {
-            panel.addView(TextView(c).apply {
-                text = t
-                textSize = 17f
-                setTextColor(if (red) 0xFFFF453A.toInt() else Color.WHITE)
-                setPadding(c.px(18f).toInt(), c.px(13f).toInt(), c.px(18f).toInt(), c.px(13f).toInt())
-                setSingleLine()
-                ellipsize = TextUtils.TruncateAt.END
-                setOnClickListener { act.closeOverlay(); go() }
+        if (app != null) for (s in Apps.shortcuts(c, app)) {
+            val icon = try { Apps.launcher(c).getShortcutIconDrawable(s, resources.displayMetrics.densityDpi) } catch (_: Exception) { null }
+            rows.add(MenuRow(s.shortLabel?.toString() ?: "", icon, false, false) {
+                try { Apps.launcher(c).startShortcut(s, null, null) } catch (_: Exception) {}
             })
         }
-        if (app != null) for (s in Apps.shortcuts(c, app)) row(s.shortLabel?.toString() ?: "") {
-            try { Apps.launcher(c).startShortcut(s, null, null) } catch (_: Exception) {}
-        }
-        row("编辑主屏幕") { act.home.startJiggle() }
-        if (app != null) row("应用信息") { act.appInfoScreen(app) }
-        row(if (item is Item.Widget) "移除小组件" else if (item is Item.Folder) "解散文件夹" else "移除 App", true) { act.confirmRemove(item) }
-        val w = c.px(250f).toInt()
+        val first = rows.size
+        rows.add(MenuRow("编辑主屏幕", Glyph(G_EDIT, ink, g), false, first > 0) { act.home.startJiggle() })
+        if (app != null) rows.add(MenuRow("应用信息", Glyph(G_INFO, ink, g), false, false) { act.appInfoScreen(app) })
+        val gone = if (item is Item.Widget) "移除小组件" else if (item is Item.Folder) "解散文件夹" else "移除 App"
+        rows.add(MenuRow(gone, Glyph(G_REMOVE, red, g), true, false) { act.confirmRemove(item) })
+
+        val list = MenuList(act, rows, dark)
+        val w = c.px(260f).toInt()
+        val h = list.total
         val sw = resources.displayMetrics.widthPixels
         val sh = resources.displayMetrics.heightPixels
-        val lp = LayoutParams(w, -2)
-        lp.leftMargin = r.left.toInt().coerceIn(c.px(16f).toInt(), sw - w - c.px(16f).toInt())
-        val rows = panel.childCount
-        val guess = (c.px(47f) * rows).toInt()
-        lp.topMargin = if (r.bottom + guess + c.px(32f) < sh) (r.bottom + c.px(26f)).toInt() else (r.top - guess - c.px(12f)).toInt()
-        addView(panel, lp)
+        val edge = c.px(16f).toInt()
+        val gap = c.px(14f).toInt()
+        val lp = LayoutParams(w, h)
+        // Hangs from the icon's own side, so it opens towards the middle of the screen.
+        val fromLeft = r.centerX() < sw / 2f
+        lp.leftMargin = (if (fromLeft) r.left.toInt() else (r.right - w).toInt()).coerceIn(edge, sw - w - edge)
+        val below = r.bottom + gap + h + edge < sh
+        lp.topMargin = if (below) (r.bottom + gap).toInt() else (r.top - gap - h).toInt().coerceAtLeast(edge)
+        addView(list, lp)
+        list.pivotX = if (fromLeft) c.px(32f) else w - c.px(32f)
+        list.pivotY = if (below) 0f else h.toFloat()
+        list.scaleX = 0.25f
+        list.scaleY = 0.25f
+        list.alpha = 0f
+        list.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(300)
+            .setInterpolator(android.view.animation.OvershootInterpolator(1.3f)).start()
+    }
+
+    override fun onDraw(c: Canvas) {
+        full.set(0f, 0f, width.toFloat(), height.toFloat())
+        Glass.draw(c, full, 0f, 0x2E000000, 150, border = false)
+        if (item !is Item.Widget) home.drawLifted(c, item, r)
     }
 }
 
@@ -243,7 +468,10 @@ private fun searchField(c: Context, hint: String) = EditText(c).apply {
     background = null
     setSingleLine()
     imeOptions = EditorInfo.IME_ACTION_SEARCH
-    setPadding(c.px(20f).toInt(), c.px(12f).toInt(), c.px(20f).toInt(), c.px(12f).toInt())
+    setPadding(c.px(16f).toInt(), c.px(12f).toInt(), c.px(20f).toInt(), c.px(12f).toInt())
+    val g = c.px(20f).toInt()
+    setCompoundDrawables(Glyph(G_SEARCH, 0xB3FFFFFF.toInt(), g.toFloat()).apply { setBounds(0, 0, g, g) }, null, null, null)
+    compoundDrawablePadding = c.px(8f).toInt()
 }
 
 @SuppressLint("ViewConstructor")
@@ -258,16 +486,31 @@ class SpotlightView(act: HomeActivity) : Backdrop(act) {
             act.launch(a, r)
         })
         grid.apps = suggestions(act)
-        val col = GlassPanel(c, c.px(24f), 0x40FFFFFF).apply {
+        val box = GlassPanel(c, c.px(24f), 0x48FFFFFF).apply { isClickable = true; addView(field) }
+        val pane = ScrollView(c).apply { addView(grid); isVerticalScrollBarEnabled = false }
+        val results = GlassPanel(c, c.px(28f), 0x38FFFFFF).apply {
             isClickable = true
-            addView(field)
-            addView(ScrollView(c).apply { addView(grid); isVerticalScrollBarEnabled = false }, LinearLayout.LayoutParams(-1, c.px(320f).toInt()))
+            setPadding(0, c.px(10f).toInt(), 0, c.px(6f).toInt())
+            addView(pane)
+        }
+        // The panel hugs its rows, so a short list does not leave an empty slab under the field.
+        fun fit() {
+            val rows = ceil(grid.apps.size / 6f).toInt()
+            results.visibility = if (rows == 0) GONE else VISIBLE
+            pane.layoutParams = LinearLayout.LayoutParams(-1, min(rows * c.px(104f), c.px(424f)).toInt())
+        }
+        fit()
+        val col = LinearLayout(c).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(box, LinearLayout.LayoutParams(-1, -2))
+            addView(results, LinearLayout.LayoutParams(-1, -2).apply { topMargin = c.px(12f).toInt() })
         }
         addView(col, LayoutParams(w, -2, Gravity.CENTER_HORIZONTAL).apply { topMargin = top })
         Bg.run { Apps.buildSearch() }
         field.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable) {
                 grid.apps = if (s.isBlank()) suggestions(act) else Apps.find(s.toString())
+                fit()
             }
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, d: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, d: Int) {}
@@ -344,7 +587,12 @@ class LibraryView(private val act: HomeActivity) : FrameLayout(act) {
                 val inX = e.x % (s + pad) > s / 2
                 val inY = e.y % (s + labelH + pad) > s / 2
                 val slot = (if (inY) 2 else 0) + if (inX) 1 else 0
-                if (slot == 3 && cat.second.size > 4) act.openCategory(cat.first, cat.second)
+                if (slot == 3 && cat.second.size > 4) {
+                    getLocationOnScreen(at)
+                    val tx = at[0] + (i % perRow) * (s + pad)
+                    val ty = at[1] + (i / perRow) * (s + labelH + pad)
+                    act.openCategory(cat.first, cat.second, RectF(tx, ty, tx + s, ty + s))
+                }
                 else cat.second.getOrNull(slot)?.let {
                     val g = context.px(12f)
                     val big = (s - g * 3) / 2

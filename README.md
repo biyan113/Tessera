@@ -12,9 +12,9 @@
 |---|---|
 | ![小组件页](docs/screenshots/today.jpg) | ![资源库](docs/screenshots/library.jpg) |
 
-| 文件夹 | 编辑模式 |
-|---|---|
-| ![文件夹](docs/screenshots/folder.jpg) | ![编辑模式](docs/screenshots/edit.jpg) |
+编辑模式：
+
+![编辑模式](docs/screenshots/edit.jpg)
 
 ![搜索](docs/screenshots/search.jpg)
 
@@ -74,7 +74,7 @@ adb shell am force-stop com.zui.launcher
 
 包名是 `app.homepad`，这是项目改名前的名字，保留它是为了能覆盖安装。
 
-首次运行的布局写在 `Model.kt` 的 `seed` 里，是作者自己的应用排布，换设备时改这里。
+首次运行的默认布局写在 `Model.kt` 的 `seed` 里，可按自己的应用改。
 
 ## 下拉面板
 
@@ -87,6 +87,12 @@ adb shell "su -c 'CLASSPATH=/data/local/tmp/shade.dex app_process / Shade'"
 ```
 
 首次应用后要重启一次 SystemUI，媒体卡片才会按新宽度排版。还原时把最后一条命令的 `Shade` 换成 `Shade off`。
+
+`panel/` 是独立的控制中心和通知下拉，`settings/` 是 iPad 风格设置。`daemon/` 是 root helper（`tesserad`），开机由 Magisk `service.d` 拉起：
+
+```bash
+daemon/install.sh <adb-serial>
+```
 
 ## ZUI 上的注意事项
 

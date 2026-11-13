@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Keeps the launcher on screen underneath while its zoom plays. -->
+<alpha xmlns:android="http://schemas.android.com/apk/res/android"
+    android:duration="460"
+    android:fromAlpha="1"
+    android:toAlpha="1" />

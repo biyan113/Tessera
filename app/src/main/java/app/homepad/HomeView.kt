@@ -10,6 +10,9 @@ import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.RenderEffect
+import android.graphics.RenderNode
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.BatteryManager
 import android.text.TextPaint
@@ -58,6 +61,12 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
     private var dockSlot = 0f
     private var dockFirstX = 0f
     private var dockIconY = 0f
+    /** Horizontal scroll of the dock's contents; only non-zero when they are wider than the screen. */
+    private var dockOff = 0f
+    private var dockMaxOff = 0f
+    private var dockOff0 = 0f
+    private var dockFling: ValueAnimator? = null
+    private val dockClip = android.graphics.Path()
     var recents: List<AppInfo> = emptyList()
 
     private var flows = ArrayList<IntArray>()
@@ -81,11 +90,12 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
     private var mergeSince = 0L
     private var edgeSince = 0L
 
-    private enum class Mode { IDLE, PRESS, SCROLL, PULL, MENU, DRAG, IGNORE }
+    private enum class Mode { IDLE, PRESS, SCROLL, DOCK, TODAY, PULL, MENU, DRAG, IGNORE }
     private var mode = Mode.IDLE
     private var downX = 0f
     private var downY = 0f
     private var press: Hit? = null
+    private var pressDim = false
     private var vt: VelocityTracker? = null
     private val slop = ViewConfiguration.get(act).scaledTouchSlop.toFloat()
 
@@ -105,6 +115,8 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
     private val longPress = Runnable {
         val h = press
         if (mode != Mode.PRESS) return@Runnable
+        pressDim = false
+        invalidate()
         performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
         if (h?.item != null && h.kind == 0) {
             mode = Mode.MENU
@@ -167,6 +179,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         gridT = insetTop + dp(18f)
         val dockTop = height - insetBottom - dockH - dp(4f)
         cellH = (dockTop - dp(28f) - gridT) / rows
+        todayMetrics()
         Glass.screenW = width
         Glass.screenH = height
         reflow()
@@ -174,21 +187,117 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
 
     fun reflow() {
         val m = layoutModel
+        // The today column takes widgets only; an icon that ended up there goes to the first page.
+        if (m.pages.size > 1) {
+            val strays = m.pages[0].filter { it !is Item.Widget }
+            if (strays.isNotEmpty()) { m.pages[0].removeAll(strays); m.pages[1].addAll(strays) }
+        }
         val out = ArrayList<IntArray>(m.pages.size)
-        for (p in m.pages) out.add(flow(p))
+        for ((i, p) in m.pages.withIndex()) out.add(flowOf(i, p))
         flows = out
+        measureToday()
         measureDock()
         placeChildren()
         invalidate()
     }
 
-    /** Items fill the grid from the top left with no gaps; widgets take the first space they fit. */
-    private fun flow(p: List<Item>): IntArray {
+    // ---- today page: one widget column on the left, over the blurred first page ----
+
+    private var todayX = 0f
+    private var todayTop = 0f
+    private var todayS = 1f
+    private val todayGap get() = dp(16f)
+    private val editRect = RectF()
+    /**
+     * Vertical scroll of the today column. In landscape its widgets and edit pill are taller than
+     * the space above the dock, so it scrolls like iPadOS: the dock floats over whatever is below.
+     */
+    private var todayScroll = 0f
+    private var todayMax = 0f
+    private var todayScroll0 = 0f
+    private var todayFling: ValueAnimator? = null
+
+    /** Compact header (smaller time, edit pill beside it) when the full one would squeeze the widgets. */
+    private var todayCompact = false
+    private val headerH get() = dp(if (todayCompact) 84f else 112f)
+
+    private fun todayMetrics() {
+        todayX = dp(28f)
+    }
+
+    /**
+     * Sizes the today column to the screen: widgets keep their full 158dp when everything fits
+     * above the dock, and shrink (no smaller than 110dp) when it does not, first by tightening the
+     * header and moving the edit pill up beside the time. Only a column that still overflows at
+     * the smallest size scrolls, and then it is clipped below the status bar.
+     */
+    private fun measureToday() {
+        val f = flows.getOrNull(0)
+        val list = layoutModel.pages.getOrNull(0)
+        // Height of the column in widget units: n squares and n-1 gaps.
+        var units = 0
+        if (f != null && list != null) for ((i, it) in list.withIndex()) {
+            if (it !is Item.Widget || i * 2 + 1 >= f.size || f[i * 2] < 0) continue
+            units = max(units, f[i * 2 + 1] + if (it.sy > 2) 2 else 1)
+        }
+        val free = height - insetBottom - dockH - dp(4f) - dp(12f)
+        val widthCap = min(dp(158f), (width * 0.52f - dp(44f)) / 2)
+        fun fit(header: Float, pill: Float) =
+            if (units == 0) widthCap else (free - gridT - header - pill - (units - 1) * todayGap) / units
+        todayCompact = fit(dp(112f), dp(72f)) < widthCap
+        todayS = (if (todayCompact) fit(dp(84f), 0f) else widthCap).coerceIn(min(dp(110f), widthCap), widthCap)
+        todayTop = gridT + headerH
+        val bottom = todayTop + units * todayS + max(0, units - 1) * todayGap + if (todayCompact) 0f else dp(72f)
+        todayMax = max(0f, bottom - free)
+        todayScroll = todayScroll.coerceIn(0f, todayMax)
+    }
+
+    private fun scrollToday(to: Float) {
+        todayScroll = to
+        placeChildren()
+        invalidate()
+    }
+
+    private fun settleToday(v: Float) {
+        todayFling?.cancel()
+        val from = todayScroll
+        val to = if (from !in 0f..todayMax) from.coerceIn(0f, todayMax) else (from - v * 0.3f).coerceIn(0f, todayMax)
+        if (abs(to - from) < 1f) return
+        todayFling = ValueAnimator.ofFloat(from, to).apply {
+            duration = if (from !in 0f..todayMax) 300 else 420
+            interpolator = DecelerateInterpolator(1.6f)
+            addUpdateListener { scrollToday(it.animatedValue as Float) }
+            start()
+        }
+    }
+
+    /** How far the today page is pulled in: 0 on the first home page, 1 when fully open. */
+    private val today get() = if (width == 0) 0f else (1 - scroll / width).coerceIn(0f, 1f)
+
+    /**
+     * Horizontal offset of a page. The today column slides in over the first page, which stays
+     * put underneath; every other page turns as usual.
+     */
+    private fun ox(p: Int): Float = when {
+        p == 0 -> -(1 - today) * (todayX + todayS * 2 + todayGap + dp(12f))
+        scroll < width -> (p - 1) * width.toFloat()
+        else -> p * width - scroll
+    }
+
+    private fun flowOf(i: Int, p: List<Item>) = if (i == 0) flow(p, 2, 8, true) else flow(p, cols, rows, false)
+
+    /**
+     * Items fill the grid from the top left with no gaps; widgets take the first space they fit.
+     * On the today page the unit is a small square widget: anything wider than two icon cells
+     * spans both columns, anything taller than two spans two rows.
+     */
+    private fun flow(p: List<Item>, cols: Int, rows: Int, today: Boolean): IntArray {
         val used = BooleanArray(cols * rows)
         val out = IntArray(p.size * 2) { -1 }
         for ((n, it) in p.withIndex()) {
-            val sx = if (it is Item.Widget) min(it.sx, cols) else 1
-            val sy = if (it is Item.Widget) min(it.sy, rows) else 1
+            if (today && it !is Item.Widget) continue
+            val sx = if (it !is Item.Widget) 1 else if (today) (if (it.sx > 2) 2 else 1) else min(it.sx, cols)
+            val sy = if (it !is Item.Widget) 1 else if (today) (if (it.sy > 2) 2 else 1) else min(it.sy, rows)
             search@ for (y in 0..rows - sy) for (x in 0..cols - sx) {
                 var free = true
                 for (a in 0 until sx) for (b in 0 until sy) if (used[(y + b) * cols + x + a]) free = false
@@ -206,16 +315,51 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         val n = layoutModel.dock.size
         val r = recents.size
         dockSlot = icon + dp(16f)
-        val w = dp(16f) * 2 + (n + r + 1) * dockSlot - dp(16f) + dp(21f)
+        val content = dp(16f) * 2 + (n + r + 1) * dockSlot - dp(16f) + dp(21f)
+        // In portrait a full dock plus recents is wider than the screen: cap it and let it scroll.
+        val w = min(content, width - dp(16f) * 2)
+        dockMaxOff = max(0f, content - w)
+        dockOff = dockOff.coerceIn(0f, dockMaxOff)
         val top = height - insetBottom - dockH - dp(4f)
         dockRect.set((width - w) / 2, top, (width + w) / 2, top + dockH)
-        dockFirstX = dockRect.left + dp(16f)
+        dockClip.reset()
+        dockClip.addRoundRect(dockRect, dp(30f), dp(30f), android.graphics.Path.Direction.CW)
         dockIconY = top + (dockH - icon) / 2
+        placeDock()
+    }
+
+    private fun placeDock() { dockFirstX = dockRect.left + dp(16f) - dockOff }
+
+    private fun scrollDock(to: Float) {
+        dockOff = to
+        placeDock()
+        invalidate()
+    }
+
+    /** A flick keeps the dock moving and eases to a stop, clamped to its ends. */
+    private fun flingDock(v: Float) {
+        dockFling?.cancel()
+        val from = dockOff
+        val to = (from - v * 0.3f).coerceIn(0f, dockMaxOff)
+        if (abs(to - from) < 1f) return
+        dockFling = ValueAnimator.ofFloat(from, to).apply {
+            duration = 420
+            interpolator = DecelerateInterpolator(1.6f)
+            addUpdateListener { scrollDock(it.animatedValue as Float) }
+            start()
+        }
     }
 
     private fun widgetRect(p: Int, i: Int, it: Item.Widget, out: RectF): Boolean {
         val f = flows.getOrNull(p) ?: return false
         if (i * 2 + 1 >= f.size || f[i * 2] < 0) return false
+        if (p == 0) {
+            val step = todayS + todayGap
+            val x = todayX + f[i * 2] * step
+            val y = todayTop - todayScroll + f[i * 2 + 1] * step
+            out.set(x, y, x + (if (it.sx > 2) todayS * 2 + todayGap else todayS), y + (if (it.sy > 2) todayS * 2 + todayGap else todayS))
+            return true
+        }
         val pad = dp(9f)
         val x = gridL + f[i * 2] * cellW
         val y = gridT + f[i * 2 + 1] * cellH
@@ -237,7 +381,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
                 v.layoutParams = LayoutParams(w, h)
                 v.updateAppWidgetSize(null, (w / d).toInt(), (h / d).toInt(), (w / d).toInt(), (h / d).toInt())
             }
-            v.translationX = p * width - scroll + tmp.left
+            v.translationX = ox(p) + tmp.left
             v.translationY = tmp.top
         }
         library?.translationX = libIndex * width - scroll
@@ -256,7 +400,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
                 v.layoutParams = LayoutParams(1, 1)
                 v.clipToOutline = true
                 v.outlineProvider = object : ViewOutlineProvider() {
-                    override fun getOutline(view: View, o: Outline) = o.setRoundRect(0, 0, view.width, view.height, dp(22f))
+                    override fun getOutline(view: View, o: Outline) = o.setPath(Smooth.path(android.graphics.Path(), 0f, 0f, view.width.toFloat(), view.height.toFloat(), dp(24f)))
                 }
                 widgetViews[it] = v
                 addView(v)
@@ -286,17 +430,94 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         val w = width
         if (w == 0) return
         moving = false
+        val t = today
+        if (t > 0f) {
+            // The first page stays where it is and goes out of focus behind the widget column.
+            layoutModel.pages.getOrNull(1)?.let { list ->
+                behind.setPosition(0, 0, w, height)
+                drawPage(behind.beginRecording(), 1, list, 0f)
+                behind.endRecording()
+                val r = t * dp(22f)
+                behind.setRenderEffect(if (r < 1f) null else RenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP))
+                behind.alpha = 1 - 0.3f * t
+                c.drawRenderNode(behind)
+            }
+            tmp.set(0f, 0f, w.toFloat(), height.toFloat())
+            Glass.draw(c, tmp, 0f, 0x30000000, (t * 170).toInt(), border = false)
+            layoutModel.pages.getOrNull(0)?.let { drawPage(c, 0, it, ox(0)) }
+            return
+        }
         val first = (scroll / w).toInt()
         for (p in first..first + 1) {
             val list = layoutModel.pages.getOrNull(p) ?: continue
-            val ox = p * w - scroll
+            val ox = ox(p)
             if (ox <= -w || ox >= w) continue
             drawPage(c, p, list, ox)
         }
     }
 
+    private val behind = RenderNode("first-page")
+
+    private fun drawTodayHeader(c: Canvas, ox: Float) {
+        val cal = Calendar.getInstance()
+        val x = todayX + ox + dp(4f)
+        text.color = Color.WHITE
+        text.textAlign = Paint.Align.LEFT
+        text.typeface = Typeface.create(Typeface.DEFAULT, 600, false)
+        text.setShadowLayer(dp(6f), 0f, dp(1f), 0x40000000)
+        val k = if (todayCompact) 0.78f else 1f
+        text.textSize = dp(54f) * k
+        c.drawText("%d:%02d".format(cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE)), x, gridT + dp(54f) * k - todayScroll, text)
+        text.textSize = dp(19f) * (if (todayCompact) 0.9f else 1f)
+        val week = arrayOf("星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六")[cal.get(Calendar.DAY_OF_WEEK) - 1]
+        c.drawText("${cal.get(Calendar.MONTH) + 1}月${cal.get(Calendar.DAY_OF_MONTH)}日 $week", x + dp(2f), gridT + dp(86f) * k - todayScroll, text)
+        text.clearShadowLayer()
+        text.typeface = Typeface.DEFAULT
+
+        // The pill under the last widget is the only way into editing when the column has no free spot to long-press.
+        var bottom = todayTop - todayScroll
+        val list = layoutModel.pages[0]
+        for ((i, it) in list.withIndex()) if (it is Item.Widget && widgetRect(0, i, it, tmp)) bottom = max(bottom, tmp.bottom)
+        if (todayCompact) {
+            // Beside the time, flush with the column's right edge.
+            val right = todayX + todayS * 2 + todayGap
+            val top = gridT + dp(14f) - todayScroll
+            editRect.set(right - dp(76f), top, right, top + dp(34f))
+        } else {
+            val cx = todayX + todayS + todayGap / 2
+            editRect.set(cx - dp(38f), bottom + dp(18f), cx + dp(38f), bottom + dp(52f))
+        }
+        if (!jiggle) {
+            tmp.set(editRect)
+            tmp.offset(ox, 0f)
+            Glass.draw(c, tmp, dp(17f), 0x40FFFFFF, 255, ox, 0f)
+            text.textSize = dp(15f)
+            text.textAlign = Paint.Align.CENTER
+            c.drawText("编辑", tmp.centerX(), tmp.centerY() + dp(5.2f), text)
+        }
+    }
+
     private fun drawPage(c: Canvas, p: Int, list: List<Item>, ox: Float) {
         val f = flows.getOrNull(p) ?: return
+        val clip = c.save()
+        // A column that scrolls slides under the status bar's edge, never beneath its icons.
+        if (p == 0 && todayMax > 0f) c.clipRect(0f, insetTop.toFloat(), width.toFloat(), height.toFloat())
+        try { drawPageBody(c, p, list, ox, f) } finally { c.restoreToCount(clip) }
+    }
+
+    override fun drawChild(c: Canvas, child: View, time: Long): Boolean {
+        if (todayMax <= 0f || child !in todayViews()) return super.drawChild(c, child, time)
+        val s = c.save()
+        c.clipRect(0f, insetTop.toFloat(), width.toFloat(), height.toFloat())
+        val r = super.drawChild(c, child, time)
+        c.restoreToCount(s)
+        return r
+    }
+
+    private fun todayViews(): Collection<View> = layoutModel.pages.getOrNull(0)?.mapNotNull { (it as? Item.Widget)?.let { w -> widgetViews[w] } } ?: emptyList()
+
+    private fun drawPageBody(c: Canvas, p: Int, list: List<Item>, ox: Float, f: IntArray) {
+        if (p == 0) drawTodayHeader(c, ox)
         for ((i, it) in list.withIndex()) {
             if (i * 2 + 1 >= f.size || f[i * 2] < 0 || it === drag) continue
             if (it is Item.Widget) {
@@ -351,6 +572,14 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         }
         if (jiggle && it !== drag) minus(c, x, y)
         c.restoreToCount(save)
+    }
+
+    /** The pressed icon, redrawn sharp above the blurred home screen while its menu is open. */
+    fun drawLifted(c: Canvas, it: Item, r: RectF) {
+        val s = c.save()
+        c.scale(1.08f, 1.08f, r.centerX(), r.centerY())
+        drawItem(c, it, r.left, r.top, 0, false)
+        c.restoreToCount(s)
     }
 
     private fun shortOf(a: AppInfo): String {
@@ -423,7 +652,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
     }
 
     private fun drawBuiltin(c: Canvas, kind: String, r: RectF, ox: Float) {
-        Glass.draw(c, r, dp(22f), 0x30000000)
+        Glass.draw(c, r, dp(24f), 0x30000000)
         val cal = Calendar.getInstance()
         text.color = Color.WHITE
         text.typeface = Typeface.DEFAULT
@@ -516,18 +745,28 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         }
         if (jiggle) {
             for ((p, list) in layoutModel.pages.withIndex()) {
-                val ox = p * w - scroll
-                if (ox <= -w || ox >= w) continue
+                val ox = ox(p)
+                if (ox <= -w || ox >= w || (p > 0 && today >= 1f)) continue
                 for ((i, it) in list.withIndex()) if (it is Item.Widget && widgetRect(p, i, it, tmp)) minus(c, tmp.left + ox, tmp.top)
             }
             drawDone(c)
         }
         drag?.let { drawDrag(c, it) }
+        val h = press
+        if (pressDim && h != null) {
+            val s = c.save()
+            c.translate(h.rect.left, h.rect.top)
+            fill.color = 0x52000000
+            c.drawPath(tile, fill)
+            c.restoreToCount(s)
+        }
         if (jiggle || moving) postInvalidateOnAnimation()
     }
 
     private fun drawDock(c: Canvas) {
         Glass.draw(c, dockRect, dp(30f), 0x40FFFFFF)
+        val clip = c.save()
+        if (dockMaxOff > 0f) c.clipPath(dockClip)
         for ((i, it) in layoutModel.dock.withIndex()) {
             if (it === drag) continue
             val pos = animated(it, dockFirstX + i * dockSlot, dockIconY)
@@ -543,6 +782,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
             x += dockSlot
         }
         drawLibraryGlyph(c, x, dockIconY)
+        c.restoreToCount(clip)
     }
 
     private fun drawLibraryGlyph(c: Canvas, x: Float, y: Float) {
@@ -661,12 +901,18 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 settle?.cancel()
+                dockFling?.cancel()
+                todayFling?.cancel()
+                dockOff0 = dockOff
+                todayScroll0 = todayScroll
                 vt?.recycle()
                 vt = VelocityTracker.obtain()
                 downX = x
                 downY = y
                 mode = Mode.PRESS
                 press = hit(x, y)
+                pressDim = !jiggle && press != null && press?.item !is Item.Widget
+                if (pressDim) invalidate()
                 removeCallbacks(longPress)
                 if (page < libIndex && !dockTapOnly(press)) postDelayed(longPress, 380)
             }
@@ -676,10 +922,16 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
                 when (mode) {
                     Mode.PRESS -> if (abs(dx) > slop || abs(dy) > slop) {
                         removeCallbacks(longPress)
+                        if (pressDim) { pressDim = false; invalidate() }
                         val h = press
                         when {
                             jiggle && h?.item != null && h.kind == 0 -> startDrag(h, x, y)
+                            abs(dx) > abs(dy) && dockMaxOff > 0f && page < libIndex && dockRect.contains(downX, downY) -> mode = Mode.DOCK
                             abs(dx) > abs(dy) -> mode = Mode.SCROLL
+                            // On the today page a vertical drag scrolls the column; pulling down
+                            // at its top still opens search.
+                            page == 0 && todayMax > 0f && (dy < 0 || todayScroll > 0f) &&
+                                downX < todayX + todayS * 2 + todayGap + dp(16f) -> mode = Mode.TODAY
                             dy > 0 && !jiggle && page < libIndex -> mode = Mode.PULL
                             else -> mode = Mode.IGNORE
                         }
@@ -693,6 +945,19 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
                         syncWidgets()
                         invalidate()
                     }
+                    Mode.DOCK -> {
+                        // Rubber-band past either end, like the pages.
+                        var t = dockOff0 - dx
+                        if (t < 0) t /= 3
+                        if (t > dockMaxOff) t = dockMaxOff + (t - dockMaxOff) / 3
+                        scrollDock(t)
+                    }
+                    Mode.TODAY -> {
+                        var t = todayScroll0 - dy
+                        if (t < 0) t /= 3
+                        if (t > todayMax) t = todayMax + (t - todayMax) / 3
+                        scrollToday(t)
+                    }
                     Mode.PULL -> if (dy > dp(70f)) { mode = Mode.IGNORE; act.openSpotlight() }
                     Mode.MENU -> if (abs(dx) + abs(dy) > slop * 2) {
                         act.closeOverlay()
@@ -704,6 +969,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(longPress)
+                if (pressDim) { pressDim = false; invalidate() }
                 val up = e.actionMasked == MotionEvent.ACTION_UP
                 when (mode) {
                     Mode.PRESS -> if (up) tap(x, y)
@@ -717,6 +983,25 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
                             else -> page
                         }
                         snapTo(target.coerceIn(0, libIndex))
+                    }
+                    Mode.DOCK -> {
+                        vt?.addMovement(e)
+                        vt?.computeCurrentVelocity(1000)
+                        val v = vt?.xVelocity ?: 0f
+                        if (dockOff !in 0f..dockMaxOff) {
+                            dockFling?.cancel()
+                            dockFling = ValueAnimator.ofFloat(dockOff, dockOff.coerceIn(0f, dockMaxOff)).apply {
+                                duration = 300
+                                interpolator = DecelerateInterpolator()
+                                addUpdateListener { scrollDock(it.animatedValue as Float) }
+                                start()
+                            }
+                        } else flingDock(v)
+                    }
+                    Mode.TODAY -> {
+                        vt?.addMovement(e)
+                        vt?.computeCurrentVelocity(1000)
+                        settleToday(vt?.yVelocity ?: 0f)
                     }
                     Mode.DRAG -> drop()
                     else -> {}
@@ -743,6 +1028,9 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
             }
             return
         }
+        if (page == 0 && editRect.contains(x, y)) { startJiggle(); return }
+        // Tapping the home screen showing beside the column puts the column away.
+        if (page == 0 && press == null && x > todayX + todayS * 2 + todayGap + dp(16f)) { snapTo(1); return }
         val h = press ?: return
         when (h.kind) {
             2 -> snapTo(libIndex)
@@ -760,8 +1048,9 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         val from = scroll
         val to = (p * width).toFloat()
         settle = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = if (fast) 200 else 340
-            interpolator = DecelerateInterpolator(2.2f)
+            val sp = Spring(1f, if (fast) 0.26f else 0.36f)
+            duration = sp.millis
+            interpolator = sp
             addUpdateListener {
                 scroll = from + (to - from) * (it.animatedValue as Float)
                 placeChildren()
@@ -777,6 +1066,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
 
     fun startJiggle() {
         if (jiggle) return
+        Sfx.tick()
         jiggle = true
         jiggleStart = System.currentTimeMillis()
         invalidate()
@@ -844,8 +1134,12 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         val p = page.coerceIn(0, layoutModel.pages.size - 1)
         val list = layoutModel.pages[p]
         val f = flows.getOrNull(p) ?: return
-        val cx = ((x - gridL) / cellW).toInt().coerceIn(0, cols - 1)
-        val cy = ((y - gridT) / cellH).toInt().coerceIn(0, rows - 1)
+        // The today column holds widgets only, in its own two-column grid.
+        if (p == 0 && it !is Item.Widget) return
+        val left = if (p == 0) todayX else gridL
+        val stepX = if (p == 0) todayS + todayGap else cellW
+        val cx = ((x - left) / stepX).toInt().coerceIn(0, (if (p == 0) 2 else cols) - 1)
+        val cy = if (p == 0) ((y - todayTop + todayScroll) / stepX).toInt().coerceIn(0, 7) else ((y - gridT) / cellH).toInt().coerceIn(0, rows - 1)
         var over = -1
         var idx = list.size
         for (i in list.indices) {
@@ -856,7 +1150,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
             if (fy > cy || (fy == cy && fx >= cx)) { idx = i; break }
         }
         val under = list.getOrNull(over)
-        val centered = under != null && abs(x - (gridL + (cx + .5f) * cellW)) < cellW * 0.27f
+        val centered = under != null && abs(x - (left + (cx + .5f) * cellW)) < cellW * 0.27f
         if (it is Item.App && centered && under !== it && (under is Item.App || under is Item.Folder)) {
             if (mergeTarget !== under) { mergeTarget = under; mergeSince = now }
             invalidate()
@@ -879,7 +1173,7 @@ class HomeView(private val act: HomeActivity) : ViewGroup(act) {
         var i = p
         while (i < layoutModel.pages.size) {
             val l = layoutModel.pages[i]
-            val f = flow(l)
+            val f = flowOf(i, l)
             var bad = -1
             for (n in l.indices) if (f[n * 2] < 0) { bad = n; break }
             if (bad < 0) break

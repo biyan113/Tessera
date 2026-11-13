@@ -98,7 +98,8 @@ class HomeActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (stopped) settleIn()
+        // A zoom still on screen means the launch never covered us (cancelled, or bounced straight back).
+        if (clearZoom() || stopped) settleIn()
         stopped = false
         val f = IntentFilter(Intent.ACTION_TIME_TICK).apply {
             addAction(Intent.ACTION_TIME_CHANGED)
@@ -117,6 +118,7 @@ class HomeActivity : Activity() {
     override fun onStop() {
         super.onStop()
         host.stopListening()
+        clearZoom()
         stopped = true
         Icons.shrink()
         Icons.release()
@@ -160,21 +162,41 @@ class HomeActivity : Activity() {
         if (Apps.map.isNotEmpty()) home.layoutModel.save(this)
     }
 
+    private var zoom: LaunchView? = null
+
     fun launch(a: AppInfo, r: RectF) {
         val b = Rect(r.left.toInt(), r.top.toInt(), r.right.toInt(), r.bottom.toInt())
-        val o = ActivityOptions.makeScaleUpAnimation(home, b.left, b.top, b.width(), b.height()).toBundle()
-        Apps.launch(this, a, b, o)
+        val o = ActivityOptions.makeCustomAnimation(this, R.anim.app_in, R.anim.home_hold).toBundle()
+        if (!Apps.launch(this, a, b, o)) return
+        clearZoom()
+        zoom = LaunchView(this, Icons.get(a), RectF(r)).also {
+            root.addView(it, FrameLayout.LayoutParams(-1, -1))
+            it.start()
+        }
+        // The rest of the home screen falls away past the viewer as the app comes forward.
+        home.pivotX = r.centerX()
+        home.pivotY = r.centerY()
+        home.animate().scaleX(1.12f).scaleY(1.12f).alpha(0.3f).setDuration(360)
+            .setInterpolator(android.view.animation.DecelerateInterpolator(1.6f)).start()
     }
 
-    /** One quiet ease back into place when returning from an app. */
+    private fun clearZoom(): Boolean {
+        val v = zoom ?: return false
+        zoom = null
+        root.removeView(v)
+        return true
+    }
+
+    /** Coming back: the icons arrive from slightly too large and settle, on a spring with a little life in it. */
     private fun settleIn() {
-        home.alpha = 0.4f
-        home.scaleX = 1.04f
-        home.scaleY = 1.04f
+        val s = Spring(0.86f, 0.42f)
+        home.animate().cancel()
+        home.alpha = 0f
+        home.scaleX = 1.12f
+        home.scaleY = 1.12f
         home.pivotX = home.width / 2f
         home.pivotY = home.height / 2f
-        home.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(240)
-            .setInterpolator(android.view.animation.DecelerateInterpolator(2f)).start()
+        home.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(s.millis).setInterpolator(s).start()
     }
 
     /** Where a launch with no icon on screen, such as search's enter key, grows from. */
@@ -203,10 +225,34 @@ class HomeActivity : Activity() {
         )
     }
 
+    private var blurAnim: android.animation.ValueAnimator? = null
+    private var blurNow = 0f
+
+    /**
+     * Blurs the icons inside this window. The wallpaper is a different window, which this device
+     * cannot blur, so overlays still lay the frosted wallpaper sample over it.
+     */
+    private fun blurTo(target: Float) {
+        blurAnim?.cancel()
+        blurAnim = android.animation.ValueAnimator.ofFloat(blurNow, target).apply {
+            duration = 220
+            addUpdateListener {
+                blurNow = it.animatedValue as Float
+                val r = blurNow * resources.displayMetrics.density
+                home.setRenderEffect(
+                    if (r < 1f) null
+                    else android.graphics.RenderEffect.createBlurEffect(r, r, android.graphics.Shader.TileMode.CLAMP)
+                )
+            }
+            start()
+        }
+    }
+
     fun show(v: View) {
         closeOverlay()
         overlay = v
         applyBars()
+        blurTo(26f)
         root.addView(v, FrameLayout.LayoutParams(-1, -1))
         v.alpha = 0f
         v.animate().alpha(1f).setDuration(170).start()
@@ -216,16 +262,22 @@ class HomeActivity : Activity() {
         val v = overlay ?: return
         overlay = null
         applyBars()
+        blurTo(0f)
         (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
             .hideSoftInputFromWindow(root.windowToken, 0)
-        v.animate().alpha(0f).setDuration(140).withEndAction { root.removeView(v); Icons.release() }.start()
+        val end = Runnable { root.removeView(v); Icons.release() }
+        if (v is Morph) {
+            // Goes back into the icon it came out of, and only then fades.
+            v.leave()
+            v.animate().alpha(0f).setStartDelay(90).setDuration(170).withEndAction(end).start()
+        } else v.animate().alpha(0f).setDuration(140).withEndAction(end).start()
     }
 
     fun openSpotlight() = show(SpotlightView(this))
-    fun openFolder(f: Item.Folder, r: RectF) = show(FolderView(this, f, null))
-    fun openCategory(name: String, list: List<AppInfo>) = show(FolderView(this, null, name to list))
+    fun openFolder(f: Item.Folder, r: RectF) { show(FolderView(this, f, null, r)); Sfx.pop() }
+    fun openCategory(name: String, list: List<AppInfo>, r: RectF? = null) { show(FolderView(this, null, name to list, r)); Sfx.pop() }
     fun openGallery() = show(GalleryView(this))
-    fun showMenu(it: Item, r: RectF, inDock: Boolean) = show(MenuView(this, it, r))
+    fun showMenu(it: Item, r: RectF, inDock: Boolean) { show(MenuView(this, it, r)); Sfx.pop() }
 
     fun confirmRemove(it: Item) = show(ConfirmView(this, it))
 

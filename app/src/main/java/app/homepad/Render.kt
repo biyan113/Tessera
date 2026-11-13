@@ -167,6 +167,8 @@ object Glass {
     var bottomLuma = 0f
     var screenW = 1
     var screenH = 1
+    /** How much of the frosted wallpaper covers the home screen behind an overlay; the blurred icons show through the rest. */
+    const val veil = 200
 
     fun draw(c: Canvas, r: RectF, radius: Float, tintColor: Int, alpha: Int = 255, ox: Float = 0f, oy: Float = 0f, border: Boolean = true) {
         val b = bmp
@@ -178,15 +180,15 @@ object Glass {
             sh.setLocalMatrix(m)
             p.shader = sh
             p.alpha = alpha
-            c.drawRoundRect(r, radius, radius, p)
+            Smooth.draw(c, r, radius, p)
         }
         tint.color = if (b == null) (tintColor or 0x50000000) else tintColor
         tint.alpha = Color.alpha(tint.color) * alpha / 255
-        c.drawRoundRect(r, radius, radius, tint)
+        Smooth.draw(c, r, radius, tint)
         if (border) {
             edge.strokeWidth = 1.5f
             edge.alpha = 0x38 * alpha / 255
-            c.drawRoundRect(r, radius, radius, edge)
+            Smooth.draw(c, r, radius, edge)
         }
     }
 
@@ -273,10 +275,13 @@ object Glass {
     }
 }
 
-/** Counts live in memory only; notification content is never read or stored. */
+/** Counts live in memory only and content is never stored; new arrivals are handed to [Speaker]. */
 class BadgeService : NotificationListenerService() {
     override fun onListenerConnected() = refresh()
-    override fun onNotificationPosted(n: StatusBarNotification?) = refresh()
+    override fun onNotificationPosted(n: StatusBarNotification?, map: RankingMap?) {
+        refresh()
+        if (n != null) try { Speaker.posted(this, n, map) } catch (_: Exception) {}
+    }
     override fun onNotificationRemoved(n: StatusBarNotification?) = refresh()
     override fun onNotificationRankingUpdate(map: RankingMap?) = refresh()
 

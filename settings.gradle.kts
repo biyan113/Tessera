@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "Tessera"
-include(":app")
+include(":app", ":panel", ":settings")
